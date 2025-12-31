@@ -15,6 +15,7 @@ import argparse
 import sys
 from pathlib import Path
 from typing import Optional, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from app.core.config import config, AppConfig
 from app.core.logging import logger, setup_logging
@@ -88,40 +89,54 @@ class AudiobookPipeline:
             logger.info("Skipping TTS (--extract-only flag)")
             return book
         
-        # Step 3: Process chapters sequentially
-        logger.info("Step 3/3: Processing chapters (TTS + merge)...")
+        # Step 3: Process chapters in parallel
+        logger.info(f"Step 3/3: Processing chapters (TTS + merge) with {self.config.max_workers} workers...")
         logger.info("=" * 60)
         
         completed_chapters = []
         failed_chapters = []
         
-        for chapter in book.chapters:
-            if not chapter.content:
-                logger.info(f"Chapter {chapter.number}: No content, skipping")
-                continue
+        # Filter chapters with content
+        chapters_to_process = [c for c in book.chapters if c.content]
+        
+        if not chapters_to_process:
+            logger.warning("No chapters with content to process")
+            return book
+        
+        # Use ThreadPoolExecutor for parallel processing
+        with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+            # Submit all chapters for processing
+            future_to_chapter = {
+                executor.submit(self._process_single_chapter, chapter): chapter
+                for chapter in chapters_to_process
+            }
             
             try:
-                success = self._process_single_chapter(chapter)
-                if success:
-                    completed_chapters.append(chapter.number)
-                else:
-                    failed_chapters.append(chapter.number)
+                # Process results as they complete
+                for future in as_completed(future_to_chapter):
+                    chapter = future_to_chapter[future]
+                    try:
+                        success = future.result()
+                        if success:
+                            completed_chapters.append(chapter.number)
+                        else:
+                            failed_chapters.append(chapter.number)
+                    except Exception as e:
+                        logger.error(f"Chapter {chapter.number} failed with error: {e}")
+                        failed_chapters.append(chapter.number)
             except KeyboardInterrupt:
                 logger.info("\nInterrupted by user")
-                logger.info(f"Completed chapters: {completed_chapters}")
+                logger.info(f"Completed chapters: {sorted(completed_chapters)}")
                 logger.info(f"You can resume by running the same command again")
+                # Shutdown executor gracefully
+                executor.shutdown(wait=False, cancel_futures=True)
                 raise
-            except Exception as e:
-                logger.error(f"Chapter {chapter.number} failed with error: {e}")
-                failed_chapters.append(chapter.number)
-                # Continue with next chapter
-                continue
         
         logger.info("=" * 60)
         logger.info(f"Pipeline complete!")
-        logger.info(f"Completed chapters: {len(completed_chapters)}")
+        logger.info(f"Completed chapters: {len(completed_chapters)} - {sorted(completed_chapters)}")
         if failed_chapters:
-            logger.warning(f"Failed chapters: {failed_chapters}")
+            logger.warning(f"Failed chapters: {sorted(failed_chapters)}")
         logger.info(f"Output directory: {self.config.output.book_dir.absolute()}")
         
         return book
@@ -345,6 +360,13 @@ Examples:
         help="Force reprocess even if chapter MP3 already exists"
     )
     
+    parser.add_argument(
+        "--workers", "-w",
+        type=int,
+        default=3,
+        help="Number of chapters to process in parallel (default: 3)"
+    )
+    
     args = parser.parse_args()
     
     # Configure logging
@@ -356,6 +378,7 @@ Examples:
     config.output.base_dir = args.output_dir
     config.tts.voice_name = args.voice
     config.force_reprocess = args.force
+    config.max_workers = args.workers
     
     # Create pipeline
     pipeline = AudiobookPipeline()

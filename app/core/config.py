@@ -126,6 +126,7 @@ class AppConfig:
     
     # Processing settings
     force_reprocess: bool = False  # Reprocess even if chapter MP3 already exists
+    max_workers: int = 3  # Number of chapters to process in parallel
     
     def __post_init__(self):
         self.gcp_project_id = os.environ.get("GCP_PROJECT_ID", self.gcp_project_id)

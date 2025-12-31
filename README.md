@@ -52,10 +52,18 @@ pip install -r requirements.txt
 python -m app.main "http://militera.lib.ru/memo/russian/slaschov_ya/index.html"
 ```
 
+**Parallel Processing**: Process multiple chapters simultaneously for faster conversion:
+
+```bash
+# Use 5 parallel workers (default is 3)
+python -m app.main --workers 5 "http://..."
+```
+
 **Resume Capability**: If the process is interrupted (Ctrl+C, crash, network issue), simply run the same command again. The pipeline will:
 - Skip chapters that are already completed (final MP3 exists)
 - Resume synthesis from the next incomplete chapter
 - Clean up any partial/corrupted files from the interruption
+- Work correctly even if chapters complete out-of-sequence (e.g., 1, 3, 5 before 2, 4)
 
 ### Force Reprocess All Chapters
 
@@ -82,12 +90,15 @@ python -m app.main --merge-only
 ```
 --extract-only    Only extract text, skip audio synthesis
 --force           Force reprocess even if chapter MP3 already exists
+--workers, -w N   Number of chapters to process in parallel (default: 3)
 --output-dir, -o  Output directory (default: audiobook)
 --voice           Google TTS voice (default: ru-RU-Wavenet-B)
 --verbose, -v     Enable verbose logging
 ```
 
 **Note**: `--merge-only` flag is deprecated. The new pipeline processes chapters sequentially (TTS + merge together).
+
+**Performance**: With `--workers 3` and larger chunk sizes (4800 chars), expect **3-4x faster** processing compared to sequential mode.
 
 ## Output Structure
 
