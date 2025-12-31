@@ -156,7 +156,7 @@ class GoogleTTSService:
         # Generate audio files with atomic writes
         audio_files = []
         for part_num, chunk in enumerate(chunks, start=1):
-            filename = f"chapter_{chapter_num:02d}_part_{part_num:02d}_{safe_title}.mp3"
+            filename = f"chapter_{chapter_num:02d}_part_{part_num:03d}_of_{len(chunks):03d}_{safe_title}.mp3"
             filepath = self.output_config.parts_dir / filename
             
             # Skip if file already exists and is valid (resumability)
