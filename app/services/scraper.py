@@ -281,6 +281,8 @@ class MiliteraScraper:
         Returns:
             Book object with chapters populated
         """
+        from app.services.extraction_strategies import detect_book_structure
+        
         logger.info(f"Parsing ToC from: {toc_url}")
         
         content, encoding = self._fetch_with_encoding(toc_url)
@@ -288,8 +290,6 @@ class MiliteraScraper:
         soup = BeautifulSoup(content, "lxml")
         
         # Extract book metadata
-        # Title is typically in a div with specific class or structure
-        title_elem = soup.find("div", class_="") or soup.find("title")
         title = "Unknown Book"
         author = "Unknown Author"
         
@@ -311,45 +311,15 @@ class MiliteraScraper:
                         else:
                             title = author_title
         
-        # Find chapter links in the content area
-        chapters = []
-        chapter_num = 0
-        seen_urls = set()  # Track seen URLs to avoid duplicates
+        # Auto-detect book structure and select appropriate strategy
+        strategy = detect_book_structure(soup)
         
-        # Look for the content div
-        content_div = soup.find("div", class_="b") or soup.body
-        
-        if content_div:
-            # Find all paragraph links that look like chapter links
-            for p in content_div.find_all("p"):
-                link = p.find("a")
-                if link and link.get("href"):
-                    href = link.get("href")
-                    chapter_title = link.get_text(strip=True)
-                    
-                    # Skip non-chapter links (illustrations, etc.)
-                    if href.endswith(".html") and chapter_title:
-                        # Filter out navigation links
-                        if href not in ["index.html"] and not href.startswith("http"):
-                            full_url = urljoin(toc_url, href)
-                            
-                            # Skip duplicate URLs
-                            if full_url in seen_urls:
-                                logger.debug(f"Skipping duplicate URL: {full_url}")
-                                continue
-                            seen_urls.add(full_url)
-                            
-                            chapter_num += 1
-                            
-                            # Clean title - remove page numbers like [5]
-                            clean_title = re.sub(r'\s*\[\d+\]\s*$', '', chapter_title)
-                            
-                            chapters.append(Chapter(
-                                number=chapter_num,
-                                title=clean_title,
-                                url=full_url
-                            ))
-                            logger.debug(f"Found chapter {chapter_num}: {clean_title}")
+        # Extract chapters using the selected strategy
+        chapters, seen_urls = strategy.extract_chapters(
+            soup,
+            toc_url,
+            self._fetch_with_encoding
+        )
         
         logger.info(f"Found {len(chapters)} chapters in '{title}' by {author}")
         
@@ -503,10 +473,13 @@ class MiliteraScraper:
         """
         book = self.parse_toc(toc_url)
         
+        # For multi-page books, fetch each chapter's content
+        # For single-page books, content is already extracted by strategy
         for chapter in book.chapters:
-            chapter.content = self.fetch_chapter_content(chapter, book.toc_urls)
-            # Small delay to be polite to the server
-            time.sleep(0.5)
+            if not chapter.content:
+                chapter.content = self.fetch_chapter_content(chapter, book.toc_urls)
+                # Small delay to be polite to the server
+                time.sleep(0.5)
         
         logger.info(f"Extracted complete book: {book.title}")
         return book
