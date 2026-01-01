@@ -15,7 +15,8 @@ from google.api_core import exceptions as gcp_exceptions
 
 from app.core.config import config, TTSConfig, OutputConfig
 from app.core.logging import logger
-from app.core.atomic_ops import atomic_write, verify_mp3_file
+from app.core.atomic_ops import verify_mp3_file
+from app.storage.storage_ops import atomic_write_storage, verify_mp3_storage
 from app.services.cleaner import TextCleaner
 
 
@@ -123,7 +124,7 @@ class GoogleTTSService:
         chapter_num: int,
         chapter_title: str,
         text: str
-    ) -> List[Path]:
+    ) -> List[str]:
         """
         Synthesize a complete chapter to audio files.
         
@@ -137,8 +138,9 @@ class GoogleTTSService:
         """
         logger.info(f"Synthesizing chapter {chapter_num}: {chapter_title}")
         
-        # Ensure output directories exist
+        # Ensure output directories exist (no-op for remote storage)
         self.output_config.ensure_dirs()
+        self.output_config.storage.mkdir(str(self.output_config.parts_subdir))
         
         # Prepare text for TTS (includes chapter announcement and cleaning)
         prepared_text = self.cleaner.prepare_for_tts(chapter_num, chapter_title, text)
@@ -157,31 +159,38 @@ class GoogleTTSService:
         audio_files = []
         for part_num, chunk in enumerate(chunks, start=1):
             filename = f"chapter_{chapter_num:02d}_part_{part_num:03d}_of_{len(chunks):03d}_{safe_title}.mp3"
-            filepath = self.output_config.parts_dir / filename
+            
+            # Paths in storage should be relative to book root for clarity
+            # But the current config handles base_dir. We want the full relative path from storage root.
+            # Usually: book_dir/parts/filename
+            if self.output_config.book_subdir:
+                storage_path = f"{self.output_config.book_subdir}/{self.output_config.parts_subdir}/{filename}"
+            else:
+                storage_path = f"{self.output_config.parts_subdir}/{filename}"
             
             # Skip if file already exists and is valid (resumability)
-            if filepath.exists() and verify_mp3_file(filepath):
+            if self.output_config.storage.exists(storage_path) and verify_mp3_storage(self.output_config.storage, storage_path):
                 logger.info(f"Part {part_num}/{len(chunks)} already exists, skipping")
-                audio_files.append(filepath)
+                audio_files.append(storage_path)
                 continue
             
             try:
                 logger.info(f"Synthesizing part {part_num}/{len(chunks)}... ")
                 audio_content = self.synthesize_text(chunk)
                 
-                # Atomic write to prevent corruption
-                atomic_write(
-                    filepath,
-                    audio_content,
-                    temp_suffix=self.output_config.temp_file_suffix
+                # Atomic write to storage
+                atomic_write_storage(
+                    self.output_config.storage,
+                    storage_path,
+                    audio_content
                 )
                 
                 # Verify the file was written correctly
-                if not verify_mp3_file(filepath):
-                    raise TTSError(f"Generated MP3 file failed validation: {filepath}")
+                if not verify_mp3_storage(self.output_config.storage, storage_path):
+                    raise TTSError(f"Generated MP3 file failed validation: {storage_path}")
                 
-                audio_files.append(filepath)
-                logger.info(f"✓ Created {filepath.name} ({len(audio_content)} bytes)")
+                audio_files.append(storage_path)
+                logger.info(f"✓ Created {filename} ({len(audio_content)} bytes)")
                 
             except TTSError as e:
                 logger.error(f"Failed to synthesize part {part_num} of chapter {chapter_num}: {e}")

@@ -33,6 +33,7 @@ audiobook/
 
 # Text extractions
 *.txt
+!requirements.txt
 
 # Temporary files
 *.tmp

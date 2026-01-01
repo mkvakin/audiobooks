@@ -21,9 +21,11 @@ from app.core.config import config, AppConfig
 from app.core.logging import logger, setup_logging
 from app.core.atomic_ops import (
     cleanup_temp_files,
-    is_chapter_completed,
-    get_chapter_final_path,
-    cleanup_parts_directory
+    get_chapter_final_path
+)
+from app.storage.storage_ops import (
+    is_chapter_completed_storage,
+    cleanup_parts_storage
 )
 from app.services.scraper import MiliteraScraper, Book
 from app.services.cleaner import TextCleaner
@@ -79,7 +81,10 @@ class AudiobookPipeline:
         self._setup_book_output(book)
         
         # Clean up any leftover temp files from previous crashes
-        cleanup_temp_files(self.config.output.book_dir, self.config.output.temp_file_suffix)
+        # Note: Local cleanup only
+        local_book_dir = self.config.output.storage.get_local_path("")
+        if local_book_dir:
+            cleanup_temp_files(local_book_dir, self.config.output.temp_file_suffix)
         
         # Step 2: Save extracted text (for reference/debugging)
         logger.info("Step 2/3: Saving extracted text...")
@@ -137,7 +142,13 @@ class AudiobookPipeline:
         logger.info(f"Completed chapters: {len(completed_chapters)} - {sorted(completed_chapters)}")
         if failed_chapters:
             logger.warning(f"Failed chapters: {sorted(failed_chapters)}")
-        logger.info(f"Output directory: {self.config.output.book_dir.absolute()}")
+        
+        # Log location
+        if self.config.output.book_subdir:
+            location = f"{self.config.output.book_subdir} in storage"
+        else:
+            location = "storage root"
+        logger.info(f"Output location: {location}")
         
         return book
     
@@ -155,17 +166,14 @@ class AudiobookPipeline:
         chapter_title = chapter.title
         
         # Check if already completed
-        if is_chapter_completed(
-            self.config.output.book_dir,
+        if is_chapter_completed_storage(
+            self.config.output.storage,
+            self.config.output.book_subdir or "",
             chapter_num,
             chapter_title
         ) and not self.config.force_reprocess:
-            final_path = get_chapter_final_path(
-                self.config.output.book_dir,
-                chapter_num,
-                chapter_title
-            )
-            logger.info(f"Chapter {chapter_num}: Already completed ({final_path.name}), skipping")
+            final_filename = get_chapter_final_path(Path("."), chapter_num, chapter_title).name
+            logger.info(f"Chapter {chapter_num}: Already completed ({final_filename}), skipping")
             return True
         
         logger.info(f"\nChapter {chapter_num}: {chapter_title}")
@@ -193,22 +201,22 @@ class AudiobookPipeline:
                 parts
             )
             
-            if not merged_file or not merged_file.exists():
+            if not merged_file:
                 logger.error(f"Merge failed for chapter {chapter_num}")
                 return False
             
             # Phase 3: Clean up part files
             if self.config.output.cleanup_parts_after_merge:
                 logger.info(f"Phase 3/3: Cleaning up part files...")
-                for part_file in parts:
-                    try:
-                        if part_file.exists():
-                            part_file.unlink()
-                            logger.debug(f"Removed: {part_file.name}")
-                    except Exception as e:
-                        logger.warning(f"Failed to remove {part_file.name}: {e}")
+                parts_subdir = str(self.config.output.parts_subdir)
+                if self.config.output.book_subdir:
+                    parts_subdir = f"{self.config.output.book_subdir}/{parts_subdir}"
+                
+                cleanup_parts_storage(self.config.output.storage, parts_subdir)
             
-            logger.info(f"✓ Chapter {chapter_num} complete: {merged_file.name}")
+            # Get actual filename for logging
+            final_filename = Path(merged_file).name
+            logger.info(f"✓ Chapter {chapter_num} complete: {final_filename}")
             return True
             
         except Exception as e:
@@ -216,10 +224,10 @@ class AudiobookPipeline:
             
             # Clean up partial work
             logger.info("Cleaning up partial work...")
-            for part_file in parts:
+            for part_path in parts:
                 try:
-                    if part_file.exists():
-                        part_file.unlink()
+                    if self.config.output.storage.exists(part_path):
+                        self.config.output.storage.delete(part_path)
                 except:
                     pass
             
@@ -243,24 +251,27 @@ class AudiobookPipeline:
         self.tts = GoogleTTSService(self.config.tts, book_output)
         self.merger = AudioMerger(book_output)
         
-        logger.info(f"Output directory: {book_output.book_dir}")
+        if book_output.book_subdir:
+            logger.info(f"Output location: {book_output.book_subdir} in storage")
+        else:
+            logger.info("Output location: storage root")
     
-    def _save_text_files(self, book: Book):
-        """
-        Save extracted text to files for reference.
-        
-        Args:
-            book: Book object with chapters
-        """
-        text_dir = self.config.output.text_dir
+        text_subdir = str(self.config.output.text_subdir)
+        if self.config.output.book_subdir:
+            text_dir_in_storage = f"{self.config.output.book_subdir}/{text_subdir}"
+        else:
+            text_dir_in_storage = text_subdir
+            
+        self.config.output.storage.mkdir(text_dir_in_storage)
         
         for chapter in book.chapters:
             if chapter.content:
                 # Save raw extracted text
-                raw_file = text_dir / f"chapter_{chapter.number:02d}_raw.txt"
-                with open(raw_file, 'w', encoding='utf-8') as f:
-                    f.write(f"# {chapter.title}\n\n")
-                    f.write(chapter.content)
+                raw_filename = f"chapter_{chapter.number:02d}_raw.txt"
+                raw_path = f"{text_dir_in_storage}/{raw_filename}"
+                
+                raw_content = f"# {chapter.title}\n\n{chapter.content}"
+                self.config.output.storage.write_text(raw_path, raw_content)
                 
                 # Save cleaned text (exactly what will be spoken by TTS)
                 prepared = self.cleaner.prepare_for_tts(
@@ -268,11 +279,12 @@ class AudiobookPipeline:
                     chapter.title, 
                     chapter.content
                 )
-                clean_file = text_dir / f"chapter_{chapter.number:02d}_clean.txt"
-                with open(clean_file, 'w', encoding='utf-8') as f:
-                    f.write(prepared)
+                clean_filename = f"chapter_{chapter.number:02d}_clean.txt"
+                clean_path = f"{text_dir_in_storage}/{clean_filename}"
+                
+                self.config.output.storage.write_text(clean_path, prepared)
         
-        logger.info(f"Saved text files to: {text_dir}")
+        logger.info(f"Saved text files to: {text_dir_in_storage}")
     
     def extract_only(self, toc_url: str) -> Book:
         """

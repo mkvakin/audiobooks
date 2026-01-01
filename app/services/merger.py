@@ -15,7 +15,8 @@ import shutil
 
 from app.core.config import config, OutputConfig
 from app.core.logging import logger
-from app.core.atomic_ops import verify_mp3_file
+from app.core.atomic_ops import verify_mp3_file, get_chapter_final_path
+from app.storage.storage_ops import get_temp_local_path, verify_mp3_storage
 
 
 class MergerError(Exception):
@@ -54,8 +55,8 @@ class AudioMerger:
         self,
         chapter_num: int,
         chapter_title: str,
-        part_files: List[Path]
-    ) -> Optional[Path]:
+        part_files: List[str]  # List of storage paths
+    ) -> Optional[str]:  # Returns storage path
         """
         Merge multiple audio parts into a single chapter file.
         
@@ -71,79 +72,96 @@ class AudioMerger:
             logger.warning(f"No parts to merge for chapter {chapter_num}")
             return None
         
-        # If only one part, just copy it
-        if len(part_files) == 1:
-            safe_title = self._sanitize_filename(chapter_title)
-            output_file = self.output_config.book_dir / f"chapter_{chapter_num:02d}_{safe_title}.mp3"
-            shutil.copy(part_files[0], output_file)
-            logger.info(f"Chapter {chapter_num}: Single part copied to {output_file.name}")
-            return output_file
-        
         logger.info(f"Merging {len(part_files)} parts for chapter {chapter_num}")
         
         # Sort parts by name to ensure correct order
         part_files = sorted(part_files)
         
-        # Create concat list file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-            for part_file in part_files:
-                # FFmpeg concat format requires escaped paths
-                escaped_path = str(part_file.absolute()).replace("'", "'\\''")
-                f.write(f"file '{escaped_path}'\n")
-            concat_file = Path(f.name)
+        # We need local paths for FFmpeg.
+        # Download files from storage to local temp if they aren't already local.
+        local_files = []
+        temp_downloads = []  # Tracks which local files need manual cleanup
         
         try:
-            # Generate output filename
-            safe_title = self._sanitize_filename(chapter_title)
-            output_file = self.output_config.book_dir / f"chapter_{chapter_num:02d}_{safe_title}.mp3"
+            for part_path in part_files:
+                local_path = get_temp_local_path(self.output_config.storage, part_path)
+                if not local_path:
+                    raise MergerError(f"Could not get local path for {part_path}")
+                
+                local_files.append(local_path)
+                
+                # Check if it was a temp download (i.e. storage doesn't have a local path for it)
+                if not self.output_config.storage.get_local_path(part_path):
+                    temp_downloads.append(local_path)
             
-            # Use temporary file for atomic operation
-            # Note: Use .tmp.mp3 so FFmpeg recognizes it as MP3 format
-            temp_output = output_file.with_name(output_file.stem + '.tmp.mp3')
+            # Create concat list file
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                for local_file in local_files:
+                    # FFmpeg concat format requires escaped paths
+                    escaped_path = str(local_file.absolute()).replace("'", "'\\''")
+                    f.write(f"file '{escaped_path}'\n")
+                concat_file = Path(f.name)
             
-            # Run FFmpeg concat
-            cmd = [
-                'ffmpeg',
-                '-y',  # Overwrite output
-                '-f', 'concat',
-                '-safe', '0',
-                '-i', str(concat_file),
-                '-c', 'copy',  # Copy without re-encoding
-                str(temp_output)
-            ]
+            # Generate local temporary file for the merged output
+            with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as f:
+                temp_output = Path(f.name)
             
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True
-            )
-            
-            if result.returncode != 0:
-                raise MergerError(f"FFmpeg failed: {result.stderr}")
-            
-            # Verify the merged file is valid
-            if not verify_mp3_file(temp_output):
-                raise MergerError(f"Merged file failed validation: {temp_output}")
-            
-            # Atomic rename to final name
-            temp_output.rename(output_file)
-            
-            logger.info(f"Chapter {chapter_num}: Merged to {output_file.name}")
-            return output_file
-            
+            try:
+                # Run FFmpeg concat
+                cmd = [
+                    'ffmpeg',
+                    '-y',  # Overwrite output
+                    '-f', 'concat',
+                    '-safe', '0',
+                    '-i', str(concat_file),
+                    '-c', 'copy',  # Copy without re-encoding
+                    str(temp_output)
+                ]
+                
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                
+                if result.returncode != 0:
+                    raise MergerError(f"FFmpeg failed: {result.stderr}")
+                
+                # Verify the merged file is valid locally
+                if not verify_mp3_file(temp_output):
+                    raise MergerError(f"Merged file failed validation: {temp_output}")
+                
+                # Generate final storage path
+                # book_dir property returns a Path, we want the relative directory name
+                final_filename = get_chapter_final_path(Path("."), chapter_num, chapter_title).name
+                if self.output_config.book_subdir:
+                    storage_path = f"{self.output_config.book_subdir}/{final_filename}"
+                else:
+                    storage_path = final_filename
+                
+                # Upload to storage
+                logger.info(f"Uploading merged chapter to {storage_path}")
+                with open(temp_output, 'rb') as f:
+                    self.output_config.storage.write_bytes(storage_path, f.read())
+                
+                logger.info(f"Chapter {chapter_num}: Merged and uploaded to {storage_path}")
+                return storage_path
+                
+            finally:
+                # Clean up local temp files
+                concat_file.unlink(missing_ok=True)
+                temp_output.unlink(missing_ok=True)
+                
         finally:
-            # Clean up concat file
-            concat_file.unlink(missing_ok=True)
+            # Clean up temp downloads
+            for temp_file in temp_downloads:
+                temp_file.unlink(missing_ok=True)
     
-    def merge_all_chapters(self, chapters_data: List[dict]) -> List[Path]:
+    def merge_all_chapters(self, chapters_data: List[dict]) -> List[str]:
         """
         Merge parts for all chapters.
         
         Args:
-            chapters_data: List of dicts with 'num', 'title', 'parts' keys
+            chapters_data: List of dicts with 'num', 'title', 'parts' (storage paths)
             
         Returns:
-            List of merged chapter file paths
+            List of merged chapter storage paths
         """
         merged_files = []
         

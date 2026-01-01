@@ -4,7 +4,10 @@ Configuration settings for the audiobook pipeline.
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.storage import StorageAdapter
 
 
 @dataclass
@@ -39,6 +42,15 @@ class OutputConfig:
     book_subdir: Optional[str] = None  # Will be set per-book
     temp_file_suffix: str = ".tmp"  # Suffix for temporary files during atomic writes
     cleanup_parts_after_merge: bool = True  # Remove part files after successful merge
+    storage: Optional['StorageAdapter'] = None
+
+    def __post_init__(self):
+        """Initialize storage adapter if not provided."""
+        if self.storage is None:
+            # Import here to avoid circular dependencies
+            from app.storage import create_storage_adapter, StorageConfig
+            storage_config = StorageConfig(base_dir=self.base_dir)
+            self.storage = create_storage_adapter(storage_config)
     
     @property
     def book_dir(self) -> Path:
@@ -110,7 +122,8 @@ class OutputConfig:
             parts_subdir=self.parts_subdir,
             text_subdir=self.text_subdir,
             chapter_prefix=self.chapter_prefix,
-            book_subdir=book_subdir
+            book_subdir=book_subdir,
+            storage=self.storage
         )
 
 
