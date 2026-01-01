@@ -24,6 +24,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Debug - Check Environment Variables
+        run: |
+          echo "PROJECT_ID length: ${#PROJECT_ID}"
+          echo "PROJECT_NUMBER length: ${#PROJECT_NUMBER}"
+          echo "REGION: $REGION"
+          if [ -z "$PROJECT_ID" ]; then
+            echo "ERROR: PROJECT_ID is empty! Check that GCP_PROJECT_ID secret is set."
+            exit 1
+          fi
+          if [ -z "$PROJECT_NUMBER" ]; then
+            echo "ERROR: PROJECT_NUMBER is empty! Check that GCP_PROJECT_NUMBER secret is set."
+            exit 1
+          fi
+
       - name: Google Auth
         id: auth
         uses: google-github-actions/auth@v2
