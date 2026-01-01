@@ -11,6 +11,70 @@ Convert books from militera.lib.ru to audiobooks using Google Cloud Text-to-Spee
 - **Resumable Operations**: Automatically resumes from where it left off if interrupted
 - **Atomic File Operations**: Uses temporary files to prevent corruption during crashes
 - **Audio Merging**: Uses FFmpeg to merge chapter parts into single files
+- **Cloud Deployment**: Runs on GCP Cloud Run with zero cost when idle
+
+## Cloud Deployment
+
+The application can be deployed to Google Cloud Platform for serverless execution.
+
+### Initial Setup
+
+1. **Run the setup script** to create a GCP project and enable required APIs:
+   ```bash
+   bash scripts/setup_project.sh YOUR_PROJECT_ID
+   ```
+
+2. **Deploy infrastructure** with Terraform:
+   ```bash
+   cd terraform
+   terraform init -backend-config="bucket=YOUR_PROJECT_ID-tf-state"
+   terraform apply
+   ```
+
+3. **Configure GitHub Secrets** for CI/CD (in your repo settings):
+   - `GCP_PROJECT_ID`: Your GCP Project ID
+   - `GCP_PROJECT_NUMBER`: Your 12-digit GCP Project Number
+
+4. **Push to main** to trigger automated deployment via GitHub Actions.
+
+### Running a Job in the Cloud
+
+Execute the Cloud Run Job to process a book:
+
+```bash
+gcloud run jobs execute audiobook-converter \
+  --region us-central1 \
+  --args="http://militera.lib.ru/memo/russian/slaschov_ya/index.html"
+```
+
+With custom options:
+
+```bash
+gcloud run jobs execute audiobook-converter \
+  --region us-central1 \
+  --args="--workers,5,--voice,ru-RU-Wavenet-D,http://militera.lib.ru/memo/russian/example/index.html"
+```
+
+### Retrieving Output
+
+Audiobooks are saved to Cloud Storage:
+
+```bash
+# List generated audiobooks
+gsutil ls gs://YOUR_PROJECT_ID-audiobooks/
+
+# Download a specific book
+gsutil -m cp -r gs://YOUR_PROJECT_ID-audiobooks/Author_BookTitle/ ./
+```
+
+### Monitoring
+
+View job execution logs:
+
+```bash
+gcloud run jobs executions logs audiobook-converter --region us-central1
+```
+
 
 ## Prerequisites
 
