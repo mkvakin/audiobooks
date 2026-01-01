@@ -12,7 +12,6 @@ tests/
 *.mp3
 *.txt
 !requirements.txt
-requirements.txt
 .env
 Dockerfile
 .dockerignore
