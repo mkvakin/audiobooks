@@ -41,12 +41,6 @@ resource "google_storage_bucket_iam_member" "storage_admin" {
   member = "serviceAccount:${google_service_account.audiobook_sa.email}"
 }
 
-# Access to Google TTS
-resource "google_project_iam_member" "tts_user" {
-  project = var.project_id
-  role    = "roles/texttospeech.serviceUser"
-  member  = "serviceAccount:${google_service_account.audiobook_sa.email}"
-}
 
 # 4. Cloud Run Job
 resource "google_cloud_run_v2_job" "converter" {
@@ -58,7 +52,7 @@ resource "google_cloud_run_v2_job" "converter" {
       service_account = google_service_account.audiobook_sa.email
 
       containers {
-        image = "${var.region}-docker.pkg.dev/${var.project_id}/audiobook-converter/app:latest"
+        image = "gcr.io/cloudrun/hello:latest"
 
         resources {
           limits = {
@@ -89,4 +83,56 @@ resource "google_cloud_run_v2_job" "converter" {
       template[0].template[0].containers[0].image,
     ]
   }
+}
+
+# 5. Workload Identity Federation for GitHub Actions
+resource "google_iam_workload_identity_pool" "github_pool" {
+  workload_identity_pool_id = "github-actions-pool"
+  display_name              = "GitHub Actions Pool"
+  description               = "Identity pool for GitHub Actions"
+}
+
+resource "google_iam_workload_identity_pool_provider" "github_provider" {
+  workload_identity_pool_id          = google_iam_workload_identity_pool.github_pool.workload_identity_pool_id
+  workload_identity_pool_provider_id = "github-provider"
+  display_name                       = "GitHub Provider"
+  description                        = "GitHub Actions identity provider"
+
+  attribute_mapping = {
+    "google.subject"       = "assertion.sub"
+    "attribute.actor"      = "assertion.actor"
+    "attribute.repository" = "assertion.repository"
+  }
+
+  oidc {
+    issuer_uri = "https://token.actions.githubusercontent.com"
+  }
+
+  attribute_condition = "assertion.repository == 'mkvakin/audiobooks'"
+}
+
+# Allow GitHub Actions to impersonate the service account
+resource "google_service_account_iam_member" "wif_impersonation" {
+  service_account_id = google_service_account.audiobook_sa.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_pool.name}/attribute.repository/mkvakin/audiobooks"
+}
+
+# Grant the Service Account permissions to manage Cloud Run and Artifact Registry (needed for deployment)
+resource "google_project_iam_member" "sa_run_admin" {
+  project = var.project_id
+  role    = "roles/run.admin"
+  member  = "serviceAccount:${google_service_account.audiobook_sa.email}"
+}
+
+resource "google_project_iam_member" "sa_artifact_writer" {
+  project = var.project_id
+  role    = "roles/artifactregistry.writer"
+  member  = "serviceAccount:${google_service_account.audiobook_sa.email}"
+}
+
+resource "google_project_iam_member" "sa_iam_user" {
+  project = var.project_id
+  role    = "roles/iam.serviceAccountUser"
+  member  = "serviceAccount:${google_service_account.audiobook_sa.email}"
 }

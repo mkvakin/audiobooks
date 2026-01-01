@@ -1,0 +1,52 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  PROJECT_NUMBER: ${{ secrets.GCP_PROJECT_NUMBER }}
+  REGION: us-central1 # Update as needed
+  SERVICE: audiobook-converter
+  ARTIFACT_REPO: audiobook-converter
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Google Auth
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          token_format: 'access_token'
+          workload_identity_provider: 'projects/${{ secrets.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/github-actions-pool/providers/github-provider'
+          service_account: 'audiobook-converter-sa@${{ secrets.GCP_PROJECT_ID }}.iam.gserviceaccount.com'
+
+      - name: Docker Auth
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGION }}-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - name: Build and Push Container
+        run: |-
+          docker build -t "${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/app:${{ github.sha }}" .
+          docker push "${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/app:${{ github.sha }}"
+
+      - name: Deploy to Cloud Run Job
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          job: ${{ env.SERVICE }}
+          region: ${{ env.REGION }}
+          image: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/app:${{ github.sha }}
